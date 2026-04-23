@@ -1,18 +1,8 @@
-"""
-Implement the TODO sections below using Redis commands.
-Each endpoint corresponds to one graded task.
-
-Run locally:
-    uvicorn app:app --reload
-
-Run tests:
-    pytest tests/ -v
-"""
-
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import redis
 import uuid
+import time
 
 app = FastAPI(title="Redis Assignments")
 
@@ -28,76 +18,61 @@ class TaskRequest(BaseModel):
 # ============================================================
 # Task 1: Session Storage
 # ============================================================
-#
-# POST /login
-#   - Accept JSON body: {"user_id": "alice"}
-#   - Generate a unique session_id (use uuid.uuid4())
-#   - Store in Redis:  SET session:<session_id> <user_id> EX 3600
-#   - Return JSON:     {"session_id": "<session_id>"}
-#
-# GET /me
-#   - Read the X-Session-Id header
-#   - Look up in Redis: GET session:<session_id>
-#   - If found  → return {"user_id": "<user_id>"}
-#   - If missing → return 401 Unauthorized
-#
-# ============================================================
 
 @app.post("/login")
 def login(body: LoginRequest):
-    # TODO: implement session creation
-    raise HTTPException(status_code=501, detail="Not implemented")
+    session_id = str(uuid.uuid4())
+    r.set(f"session:{session_id}", body.user_id, ex=3600)
+    return {"session_id": session_id}
 
 
 @app.get("/me")
-def me(x_session_id: str = Header()):
-    # TODO: implement session lookup
-    raise HTTPException(status_code=501, detail="Not implemented")
+def me(x_session_id: str = Header(None)):
+    if not x_session_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    user_id = r.get(f"session:{x_session_id}")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    return {"user_id": user_id}
 
 
 # ============================================================
 # Task 2: Rate Limiter (Fixed Window)
 # ============================================================
-#
-# GET /request?user_id=<id>
-#   - Key pattern: requests:user:<user_id>
-#   - Use counter variable which expires in 60 seconds 
-#   - If count > 5  → return 429 with {"error": "rate limit exceeded"}
-#   - Otherwise     → return 200 with {"status": "ok", "remaining": 5 - count}
-# ============================================================
 
 @app.get("/request")
 def rate_limited_request(user_id: str):
-    # TODO: implement rate limiting
-    raise HTTPException(status_code=501, detail="Not implemented")
+    key = f"requests:user:{user_id}"
+    
+    count = r.incr(key)
+    if count == 1:
+        r.expire(key, 60)
+        
+    if count > 5:
+        raise HTTPException(status_code=429, detail={"error": "rate limit exceeded"})
+    
+    return {"status": "ok", "remaining": 5 - count}
 
 
 # ============================================================
 # Task 3: Task Queue (FIFO)
 # ============================================================
-#
-# POST /task
-#   - Accept JSON body: {"task": "send_email"}
-#   - Push to the LEFT of a Redis list called "task_queue":
-#         LPUSH task_queue <task>
-#   - Return: {"status": "queued", "queue_length": <length>}
-#
-# GET /task
-#   - Pop from the RIGHT of the list 
-#   - If a task was returned → {"task": "<task>"}
-#   - If the queue is empty  → 404 with {"error": "queue is empty"}
-# ============================================================
 
 @app.post("/task")
 def add_task(body: TaskRequest):
-    # TODO: implement task enqueue
-    raise HTTPException(status_code=501, detail="Not implemented")
+    queue_length = r.lpush("task_queue", body.task)
+    return {"status": "queued", "queue_length": queue_length}
 
 
 @app.get("/task")
 def get_task():
-    # TODO: implement task dequeue
-    raise HTTPException(status_code=501, detail="Not implemented")
+    task = r.rpop("task_queue")
+    if not task:
+        raise HTTPException(status_code=404, detail={"error": "queue is empty"})
+    
+    return {"task": task}
 
 
 # ============================================================
@@ -106,4 +81,19 @@ def get_task():
 
 @app.get("/request_sliding")
 def rate_limited_request_sliding(user_id: str):
-    pass
+    key = f"requests_sliding:user:{user_id}"
+    now = time.time()
+    window = 60
+    limit = 5
+
+    r.zremrangebyscore(key, 0, now - window)
+    
+    current_count = r.zcard(key)
+    
+    if current_count >= limit:
+        raise HTTPException(status_code=429, detail={"error": "rate limit exceeded"})
+
+    r.zadd(key, {str(now): now})
+    r.expire(key, window)
+    
+    return {"status": "ok", "remaining": limit - (current_count + 1)}
